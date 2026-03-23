@@ -49,6 +49,24 @@ services:
       --staff /app/SampleData/staff_list.xlsx
       --tasks /app/SampleData/task_logs.xlsx
 
+  # ---------- Multi-file compare mode ----------
+  rag-compare:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rag-compare
+    depends_on:
+      - ollama
+    environment:
+      - PYTHON_DLL=/usr/lib/x86_64-linux-gnu/libpython3.11.so
+    volumes:
+      - ./SampleData:/app/SampleData
+    command: >
+      --compare
+      /app/SampleData/sales_q1.xlsx
+      /app/SampleData/sales_q2.xlsx
+      /app/SampleData/sales_q3.xlsx
+
   # ---------- Run tests ----------
   tests:
     build:

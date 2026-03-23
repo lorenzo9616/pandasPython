@@ -4,14 +4,16 @@
 // Uses pythonnet (Python.Runtime) to call Pandas data-processing scripts and
 // a simple embedding + Ollama RAG engine, all written in Python.
 //
-// Supports two modes:
-//   1. Single-file mode  (--file)  — GroupBy / filter on one Excel file
-//   2. Audit mode        (--audit) — merge two files, calculate productivity
+// Supports three modes:
+//   1. Single-file mode  (--file)    — GroupBy / filter on one Excel file
+//   2. Audit mode        (--audit)   — merge two files, calculate productivity
+//   3. Compare mode      (--compare) — compare N files side-by-side
 //
 // Build & Run:
 //   dotnet restore
 //   dotnet run -- --file ../SampleData/sales.xlsx --group Category --query "Which category has the highest revenue?"
 //   dotnet run -- --audit --staff ../SampleData/staff_list.xlsx --tasks ../SampleData/task_logs.xlsx --query "Who is the least productive?"
+//   dotnet run -- --compare ../SampleData/sales_q1.xlsx ../SampleData/sales_q2.xlsx ../SampleData/sales_q3.xlsx --query "Which quarter performed best?"
 // ============================================================================
 
 using System;
@@ -86,7 +88,9 @@ public static class Program
         var parsed = opts.Value;
 
         // ---- decide which mode to run --------------------------------------
-        if (parsed.auditMode)
+        if (parsed.compareMode)
+            return RunCompareMode(parsed);
+        else if (parsed.auditMode)
             return RunAuditMode(parsed);
         else
             return RunSingleFileMode(parsed);
@@ -284,6 +288,103 @@ public static class Program
     }
 
     // --------------------------------------------------------------------- //
+    //  Mode 3: Compare mode (N-file side-by-side comparison)                  //
+    // --------------------------------------------------------------------- //
+
+    private static int RunCompareMode(ParsedArgs p)
+    {
+        // Validate all files exist
+        var resolvedPaths = new List<string>();
+        foreach (string path in p.compareFiles!)
+        {
+            string full = Path.GetFullPath(path);
+            if (!File.Exists(full))
+            {
+                Console.Error.WriteLine($"[ERROR] File not found: {full}");
+                return 1;
+            }
+            resolvedPaths.Add(full);
+        }
+
+        string scriptsDir;
+        try { scriptsDir = InitialisePython(); }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[ERROR] Python init failed: {ex.Message}");
+            return 1;
+        }
+
+        Console.WriteLine($"[INFO] Python DLL   : {Runtime.PythonDLL}");
+        Console.WriteLine($"[INFO] Scripts dir  : {scriptsDir}");
+        Console.WriteLine($"[INFO] Files        : {resolvedPaths.Count}");
+        foreach (string f in resolvedPaths)
+            Console.WriteLine($"  - {f}");
+        if (!string.IsNullOrEmpty(p.compareKey))
+            Console.WriteLine($"[INFO] Compare key  : {p.compareKey}");
+        Console.WriteLine();
+
+        using (Py.GIL())
+        {
+            try
+            {
+                Console.WriteLine("=== Step 1: Multi-File Comparison (Pandas) ===");
+                dynamic compareEngine = Py.Import("compare_engine");
+
+                // Convert C# List<string> to a Python list
+                dynamic pyList = new PyList();
+                foreach (string path in resolvedPaths)
+                    pyList.Append(new PyString(path));
+
+                // Print schema overview
+                string schema = compareEngine.get_compare_schema(pyList).ToString();
+                Console.WriteLine(schema);
+                Console.WriteLine();
+
+                // Build comparison context
+                string context;
+                if (!string.IsNullOrEmpty(p.compareKey))
+                    context = compareEngine.build_compare_context(pyList, p.compareKey).ToString();
+                else
+                    context = compareEngine.build_compare_context(pyList).ToString();
+
+                Console.WriteLine("--- Comparison Report ---");
+                Console.WriteLine(context);
+                Console.WriteLine();
+
+                if (!string.IsNullOrEmpty(p.query))
+                {
+                    Console.WriteLine("=== Step 2: Compare RAG — Embedding + LLM ===");
+                    Console.WriteLine($"Query : {p.query}");
+                    Console.WriteLine($"Model : {p.model}");
+                    Console.WriteLine();
+
+                    dynamic ragEngine = Py.Import("rag_engine");
+                    string answer = ragEngine.ask_compare(p.query, context, p.model).ToString();
+
+                    Console.WriteLine("--- Comparison Analysis ---");
+                    Console.WriteLine(answer);
+                }
+                else
+                {
+                    Console.WriteLine("[INFO] No --query provided; skipping LLM step.");
+                    Console.WriteLine("       The comparison report above can be used as RAG context.");
+                }
+            }
+            catch (PythonException pyEx)
+            {
+                Console.Error.WriteLine($"[PYTHON ERROR] {pyEx.Message}");
+                Console.Error.WriteLine(pyEx.StackTrace);
+                return 1;
+            }
+        }
+
+        PythonEngine.Shutdown();
+        Console.WriteLine();
+        Console.WriteLine("[INFO] Done.");
+        return 0;
+    }
+
+    // --------------------------------------------------------------------- //
     //  GetAuditContext — call analysis_engine.build_audit_context             //
     // --------------------------------------------------------------------- //
 
@@ -360,6 +461,10 @@ public static class Program
         string? staffFile,
         string? tasksFile,
         string mergeKey,
+        // Compare mode
+        bool compareMode,
+        List<string>? compareFiles,
+        string? compareKey,
         // Shared
         string? query,
         string model);
@@ -370,6 +475,9 @@ public static class Program
         string? staffFile = null, tasksFile = null;
         string mergeKey = "EmployeeID";
         bool auditMode = false;
+        bool compareMode = false;
+        List<string> compareFiles = new();
+        string? compareKey = null;
         string? query = null;
         string model = "llama3";
 
@@ -397,6 +505,18 @@ public static class Program
                 case "--merge-key":
                     mergeKey = args[++i]; break;
 
+                // -- compare mode --
+                case "--compare":
+                    compareMode = true;
+                    // Collect all subsequent non-flag arguments as file paths
+                    while (i + 1 < args.Length && !args[i + 1].StartsWith("--") && !args[i + 1].StartsWith("-"))
+                    {
+                        compareFiles.Add(args[++i]);
+                    }
+                    break;
+                case "--compare-key":
+                    compareKey = args[++i]; break;
+
                 // -- shared --
                 case "--query" or "-q":
                     query = args[++i]; break;
@@ -408,7 +528,16 @@ public static class Program
         }
 
         // Validate required args
-        if (auditMode)
+        if (compareMode)
+        {
+            if (compareFiles.Count < 2)
+            {
+                Console.Error.WriteLine("[ERROR] Compare mode requires at least 2 file paths after --compare.");
+                PrintUsage();
+                return null;
+            }
+        }
+        else if (auditMode)
         {
             if (string.IsNullOrEmpty(staffFile) || string.IsNullOrEmpty(tasksFile))
             {
@@ -421,7 +550,7 @@ public static class Program
         {
             if (string.IsNullOrEmpty(file))
             {
-                Console.Error.WriteLine("[ERROR] --file is required (or use --audit mode).");
+                Console.Error.WriteLine("[ERROR] --file is required (or use --audit / --compare mode).");
                 PrintUsage();
                 return null;
             }
@@ -429,6 +558,7 @@ public static class Program
 
         return new ParsedArgs(file, group, filterCol, filterVal,
                               auditMode, staffFile, tasksFile, mergeKey,
+                              compareMode, compareFiles, compareKey,
                               query, model);
     }
 
@@ -449,6 +579,10 @@ AUDIT MODE (Two-file merge + productivity analysis):
   --tasks <path>             Path to the task logs file (.xlsx/.csv)   [required]
   --merge-key <column>       Column to join on (default: EmployeeID)
 
+COMPARE MODE (Multi-file side-by-side comparison):
+  --compare <f1> <f2> [f3…]  Compare 2+ Excel/CSV files
+  --compare-key <column>     Optional key column for row-level alignment
+
 SHARED OPTIONS:
   --query, -q <question>     Natural-language question for the RAG pipeline
   --model, -m <name>         Ollama model name (default: llama3)
@@ -462,7 +596,11 @@ Examples:
   Audit mode:
     dotnet run -- --audit --staff staff_list.xlsx --tasks task_logs.xlsx
     dotnet run -- --audit --staff staff.xlsx --tasks logs.xlsx -q ""Who is least productive?""
-    dotnet run -- --audit --staff staff.xlsx --tasks logs.xlsx --merge-key EmpID -q ""Trends?""
+
+  Compare mode (2+ files):
+    dotnet run -- --compare q1.xlsx q2.xlsx q3.xlsx
+    dotnet run -- --compare q1.xlsx q2.xlsx --compare-key ProductID -q ""Which quarter grew?""
+    dotnet run -- --compare jan.csv feb.csv mar.csv apr.csv -q ""Monthly trends?""
 ");
     }
 }

@@ -243,3 +243,65 @@ def ask_auditor(
     prompt = build_auditor_prompt(query, retrieved)
     answer = call_ollama(prompt, model=ollama_model)
     return answer
+
+
+# ------------------------------------------------------------------ #
+#  Multi-File Compare — specialised prompt + entry point               #
+# ------------------------------------------------------------------ #
+
+def build_compare_prompt(query: str, context_chunks: List[str]) -> str:
+    """
+    Build a prompt for multi-file comparison analysis.
+    The LLM is told to act as a data comparison specialist.
+    """
+    context_block = "\n---\n".join(context_chunks)
+    return textwrap.dedent(f"""\
+        You are an expert Data Comparison Analyst.
+        You have been given pre-calculated comparison metrics derived from
+        multiple Excel/CSV files using Pandas.
+
+        Your job is to answer the user's question using ONLY the data below.
+        When answering, you MUST:
+        1. Identify key differences between the files (numeric deltas, schema changes).
+        2. Highlight which file has the highest/lowest values for relevant metrics.
+        3. Note any data that appears in one file but not others.
+        4. Comment on trends across the files (growth, decline, stability).
+        5. Support every claim with specific numbers from the comparison data.
+        6. If the data does not contain enough information to answer, say so.
+
+        ### Comparison Data (calculated via Pandas)
+        {context_block}
+
+        ### User Question
+        {query}
+
+        ### Comparison Analysis""")
+
+
+def ask_compare(
+    query: str,
+    context_text: str,
+    ollama_model: str = "llama3",
+) -> str:
+    """
+    Multi-file comparison RAG pipeline.
+
+    *context_text* is the Markdown string returned by
+    ``compare_engine.build_compare_context()``.
+    """
+    raw_chunks = [c.strip() for c in context_text.split("\n\n") if c.strip()]
+    if not raw_chunks:
+        raw_chunks = [
+            context_text[i : i + 500]
+            for i in range(0, len(context_text), 500)
+        ]
+
+    store = SimpleVectorStore()
+    store.add(raw_chunks)
+
+    results = store.search(query, top_k=5)
+    retrieved = [text for _, text in results]
+
+    prompt = build_compare_prompt(query, retrieved)
+    answer = call_ollama(prompt, model=ollama_model)
+    return answer

@@ -21,14 +21,17 @@ pandasPython/
 ├── PythonScripts/
 │   ├── data_processor.py       # Pandas: load Excel, GroupBy, filter
 │   ├── analysis_engine.py      # Office Auditor: merge, metrics, context
+│   ├── compare_engine.py       # Multi-file comparison engine (N files)
 │   └── rag_engine.py           # Embeddings, vector store, Ollama calls
 ├── SampleData/
 │   ├── generate_sample.py      # Script to create sales.xlsx
-│   └── generate_audit_data.py  # Script to create staff_list + task_logs
+│   ├── generate_audit_data.py  # Script to create staff_list + task_logs
+│   └── generate_compare_data.py # Script to create Q1/Q2/Q3 sales files
 ├── tests/
 │   ├── conftest.py             # Shared fixtures (auto-generates sample data)
 │   ├── test_data_processor.py  # Unit tests for Pandas operations
 │   ├── test_analysis_engine.py # Unit tests for Office Auditor
+│   ├── test_compare_engine.py  # Unit tests for multi-file comparison
 │   └── test_rag_engine.py      # Unit tests for RAG pipeline
 ├── visual-explanation/         # Architecture diagrams & sample scenarios
 │   ├── architecture-diagram.md
@@ -237,6 +240,44 @@ docker compose run --rm rag-audit \
     -q "Who worked the most hours this month?"
 ```
 
+### Compare Mode (multi-file side-by-side comparison, 2+ files)
+
+```bash
+cd RagHost
+
+# Compare 3 quarterly sales reports (no LLM needed)
+dotnet run -- --compare \
+    ../SampleData/sales_q1.xlsx \
+    ../SampleData/sales_q2.xlsx \
+    ../SampleData/sales_q3.xlsx
+
+# With row-level alignment on a shared key
+dotnet run -- --compare \
+    ../SampleData/sales_q1.xlsx \
+    ../SampleData/sales_q2.xlsx \
+    ../SampleData/sales_q3.xlsx \
+    --compare-key ProductID \
+    -q "Which quarter had the best revenue growth?"
+
+# Compare any number of CSV or Excel files
+dotnet run -- --compare jan.csv feb.csv mar.csv apr.csv may.csv \
+    -q "Show me the monthly trend"
+```
+
+### With Docker (Compare Mode)
+
+```bash
+docker compose up rag-compare
+
+docker compose run --rm rag-compare \
+    --compare \
+    /app/SampleData/sales_q1.xlsx \
+    /app/SampleData/sales_q2.xlsx \
+    /app/SampleData/sales_q3.xlsx \
+    --compare-key ProductID \
+    -q "Which products grew the most between Q1 and Q3?"
+```
+
 ### CLI Options
 
 **Single-File Mode:**
@@ -256,6 +297,13 @@ docker compose run --rm rag-audit \
 | `--staff` | Path to the staff list file (.xlsx/.csv) **(required)** |
 | `--tasks` | Path to the task logs file (.xlsx/.csv) **(required)** |
 | `--merge-key` | Column to join on (default: `EmployeeID`) |
+
+**Compare Mode:**
+
+| Flag | Description |
+|------|-------------|
+| `--compare <f1> <f2> [f3…]` | Compare 2+ Excel/CSV files side-by-side |
+| `--compare-key <column>` | Optional key for row-level alignment |
 
 **Shared:**
 
@@ -300,6 +348,7 @@ docker compose --profile test run --rm tests
 |------|-------|----------------|
 | `test_data_processor.py` | 10 | Excel loading, validation, GroupBy, filtering, schema |
 | `test_analysis_engine.py` | 16 | File loading, merge, productivity calc, formatting, audit context |
+| `test_compare_engine.py` | 16 | Multi-file loading, schema/shape/numeric/categorical comparison, deltas |
 | `test_rag_engine.py` | 6 | Prompt building, embedding shapes, vector search, Ollama error handling |
 
 **Tests that run without extra dependencies:**
@@ -341,7 +390,17 @@ PythonEngine.Shutdown()
 - `format_summary_stats()` — team-wide metrics including most hours worked and lowest efficiency
 - `build_audit_context()` — end-to-end: merge → metrics → Markdown report string
 
-### 4. RAG Engine (`rag_engine.py`)
+### 4. Multi-File Compare Engine (`compare_engine.py`)
+
+- Loads 2+ Excel/CSV files and compares them side-by-side
+- `compare_schemas()` — identifies shared/unique columns, type mismatches
+- `compare_shapes()` — row counts, column counts, null cells per file
+- `compare_numeric_summaries()` — per-file count/mean/median/std/min/max/sum for shared numeric columns
+- `compute_deltas()` — pairwise mean/sum deltas with percentage change; optional row-level alignment via key column
+- `compare_categorical()` — unique value comparison across files
+- `build_compare_context()` — end-to-end: loads all files, produces full comparison Markdown report
+
+### 5. RAG Engine (`rag_engine.py`)
 
 - Embeds text chunks with `sentence-transformers` (model: `all-MiniLM-L6-v2`)
 - Stores vectors in a simple NumPy array (no external vector DB)
@@ -359,6 +418,7 @@ PythonEngine.Shutdown()
 docker-compose.yml
  ├── rag-app      Single-file mode (.NET 8 + Python 3.11)
  ├── rag-audit    Audit mode (two-file merge + productivity)
+ ├── rag-compare  Compare mode (N-file side-by-side analysis)
  ├── ollama       Local LLM server (GPU optional)
  │    └── Persists models in named volume
  └── tests        Same image, entrypoint = pytest
@@ -424,6 +484,18 @@ C# code creates PyObject wrapper
 #### 5. Data Marshalling
 
 Primitive types (int, float, string, bool) are automatically marshalled between C# and Python. For complex types (DataFrames, numpy arrays), pythonnet uses `dynamic` dispatch, which invokes Python's `__getattr__`/`__setattr__` under the hood via the CPython C-API. The data stays in Python's heap; C# gets a thin proxy, not a copy.
+
+---
+
+## Feature Roadmap
+
+The following features are planned for future development:
+
+### Anomaly Detection (`--anomalies`)
+Automatically flag statistical outliers in any numeric column using IQR (interquartile range) or z-score methods. Surfaces rows that deviate significantly from the norm — unusually high hours, suspiciously low task counts, revenue spikes — without the user needing to know what to look for. Produces an "Anomaly Report" as RAG context.
+
+### Trend Analysis (`--trend`)
+Given a time-series column (date/week/month), compute period-over-period deltas, rolling averages, and growth rates. Answers questions like "Is productivity improving or declining?" or "Which month had the biggest revenue drop?" Auto-detects date columns and generates sparkline-style text visualizations.
 
 ---
 
