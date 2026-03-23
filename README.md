@@ -23,6 +23,16 @@ pandasPython/
 │   └── rag_engine.py           # Embeddings, vector store, Ollama calls
 ├── SampleData/
 │   └── generate_sample.py      # Script to create a sample sales.xlsx
+├── tests/
+│   ├── conftest.py             # Shared fixtures (auto-generates sample data)
+│   ├── test_data_processor.py  # Unit tests for Pandas operations
+│   └── test_rag_engine.py      # Unit tests for RAG pipeline
+├── scripts/
+│   ├── setup.sh                # One-command local setup
+│   └── run_tests.sh            # Test runner
+├── Dockerfile                  # Multi-stage: .NET 8 + Python 3.11
+├── docker-compose.yml          # App + Ollama + test services
+├── .dockerignore
 ├── requirements.txt            # Python dependencies
 ├── RagHost.sln
 └── README.md
@@ -30,7 +40,43 @@ pandasPython/
 
 ---
 
-## Setup Guide
+## Quick Start
+
+### Option A: Docker (recommended)
+
+```bash
+# Build and run (data retrieval only — no LLM needed)
+docker compose up --build rag-app
+
+# Run with Ollama for full RAG pipeline
+docker compose up --build
+
+# Run tests inside Docker
+docker compose --profile test run --rm tests
+
+# Custom query (override the default command)
+docker compose run --rm rag-app \
+    --file /app/SampleData/sales.xlsx \
+    --group Category \
+    --query "Which category has the highest revenue?"
+```
+
+### Option B: Local Setup
+
+```bash
+# One-command setup (installs deps, generates sample data, restores .NET)
+bash scripts/setup.sh
+
+# Or step-by-step:
+pip install -r requirements.txt
+pip install pytest
+cd SampleData && python generate_sample.py && cd ..
+cd RagHost && dotnet restore && cd ..
+```
+
+---
+
+## Installation
 
 ### Prerequisites
 
@@ -38,13 +84,25 @@ pandasPython/
 |------|---------|---------|
 | .NET SDK | 8.0+ | Build & run the C# host |
 | Python | 3.10 – 3.12 | Runtime for Pandas + embeddings |
+| Docker | 24+ | Containerised deployment (optional) |
 | Ollama | latest | Local LLM server (optional for RAG step) |
 
 ### 1. Install Python dependencies
 
 ```bash
 pip install -r requirements.txt
+pip install pytest           # for running tests
 ```
+
+**What gets installed:**
+
+| Package | Version | Purpose |
+|---------|---------|---------|
+| `pandas` | >= 2.0 | DataFrame operations on Excel data |
+| `openpyxl` | >= 3.1 | Excel .xlsx read/write engine |
+| `sentence-transformers` | >= 2.2 | Local embedding model (all-MiniLM-L6-v2) |
+| `numpy` | >= 1.24 | Vector operations for similarity search |
+| `pytest` | latest | Test framework |
 
 ### 2. Install .NET NuGet packages
 
@@ -63,14 +121,15 @@ dotnet add package pythonnet --version 3.0.3
 
 ```bash
 cd SampleData
-python generate_sample.py    # creates sales.xlsx
+python generate_sample.py    # creates sales.xlsx (20 rows of sales data)
 ```
 
 ### 4. (Optional) Set up Ollama for LLM inference
 
 ```bash
 # Install Ollama: https://ollama.com
-ollama pull llama3           # or any model you prefer
+ollama serve                 # start the server
+ollama pull llama3           # download a model (~4 GB)
 ```
 
 ### 5. Set the Python DLL path
@@ -92,6 +151,8 @@ $env:PYTHON_DLL = "C:\Python311\python311.dll"
 
 ## Running the Application
 
+### With .NET (native)
+
 ```bash
 cd RagHost
 
@@ -108,6 +169,30 @@ dotnet run -- --file ../SampleData/sales.xlsx \
     --model llama3
 ```
 
+### With Docker
+
+```bash
+# Build the image
+docker compose build
+
+# Run data retrieval (default command groups by Category)
+docker compose up rag-app
+
+# Full RAG with Ollama (starts both containers)
+docker compose up
+
+# Custom query
+docker compose run --rm rag-app \
+    --file /app/SampleData/sales.xlsx \
+    -g Region \
+    -q "Which region has the most orders?"
+
+# Mount your own Excel file
+docker compose run --rm \
+    -v /path/to/your/data.xlsx:/app/data.xlsx \
+    rag-app --file /app/data.xlsx --group YourColumn
+```
+
 ### CLI Options
 
 | Flag | Description |
@@ -118,6 +203,50 @@ dotnet run -- --file ../SampleData/sales.xlsx \
 | `--filter-value` | Value to match in the filter column |
 | `--query, -q` | Natural-language question for the RAG pipeline |
 | `--model, -m` | Ollama model name (default: `llama3`) |
+
+---
+
+## Testing
+
+### Run tests locally
+
+```bash
+# Quick — using the helper script
+bash scripts/run_tests.sh
+
+# Or directly with pytest
+python -m pytest tests/ -v --tb=short
+
+# Run a specific test file
+python -m pytest tests/test_data_processor.py -v
+
+# Run a specific test class
+python -m pytest tests/test_data_processor.py::TestSummarizeByColumn -v
+
+# Run with coverage (install pytest-cov first)
+pip install pytest-cov
+python -m pytest tests/ -v --cov=PythonScripts --cov-report=term-missing
+```
+
+### Run tests in Docker
+
+```bash
+docker compose --profile test run --rm tests
+```
+
+### Test Suite Overview
+
+| File | Tests | What it covers |
+|------|-------|----------------|
+| `test_data_processor.py` | 10 | Excel loading, validation, GroupBy, filtering, schema |
+| `test_rag_engine.py` | 6 | Prompt building, embedding shapes, vector search, Ollama error handling |
+
+**Tests that run without extra dependencies:**
+- All `data_processor` tests (need only pandas + openpyxl)
+- `TestBuildPrompt` and `TestCallOllama` (no ML libraries needed)
+
+**Tests that require sentence-transformers:**
+- `TestEmbedding` and `TestSimpleVectorStore` (auto-skipped if not installed)
 
 ---
 
@@ -149,6 +278,28 @@ PythonEngine.Shutdown()
 - Stores vectors in a simple NumPy array (no external vector DB)
 - Retrieves top-3 most similar chunks via cosine similarity
 - Builds a constrained prompt and sends it to Ollama's `/api/generate` endpoint
+
+---
+
+## Docker Architecture
+
+```
+docker-compose.yml
+ ├── rag-app      .NET 8 + Python 3.11 (multi-stage build)
+ │    ├── Builds C# app in SDK image
+ │    └── Runs in runtime image with Python installed
+ ├── ollama       Local LLM server (GPU optional)
+ │    └── Persists models in named volume
+ └── tests        Same image as rag-app, entrypoint = pytest
+      └── Activated with --profile test
+```
+
+### Dockerfile Stages
+
+| Stage | Base Image | Purpose |
+|-------|-----------|---------|
+| `build` | `mcr.microsoft.com/dotnet/sdk:8.0` | Compile and publish the C# app |
+| `runtime` | `mcr.microsoft.com/dotnet/runtime:8.0` | Run with Python 3.11 + all pip deps |
 
 ---
 
@@ -214,6 +365,8 @@ Primitive types (int, float, string, bool) are automatically marshalled between 
 | `Ollama unreachable` | Start Ollama with `ollama serve`, then pull a model: `ollama pull llama3` |
 | `PythonException: column not found` | Check column names in your Excel file — they are case-sensitive |
 | Segfault on Python calls | Ensure all Python calls are inside a `Py.GIL()` block |
+| Docker build fails on ARM | The Dockerfile targets x86_64; for ARM use `libpython3.11.aarch64.so` |
+| Tests skip embedding tests | Install `sentence-transformers`: `pip install sentence-transformers` |
 
 ---
 

@@ -1,0 +1,53 @@
+services:
+  # ---------- Local LLM server ----------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: rag-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    # GPU support (uncomment if you have NVIDIA GPU + nvidia-docker)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  # ---------- RAG application ----------
+  rag-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rag-app
+    depends_on:
+      - ollama
+    environment:
+      - PYTHON_DLL=/usr/lib/x86_64-linux-gnu/libpython3.11.so
+    volumes:
+      - ./SampleData:/app/SampleData
+    # Override the default CMD to run a full RAG query
+    # The Ollama URL points to the sibling container
+    command: >
+      --file /app/SampleData/sales.xlsx
+      --group Category
+
+  # ---------- Run tests ----------
+  tests:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rag-tests
+    entrypoint: ["python", "-m", "pytest"]
+    command: ["/app/tests/", "-v", "--tb=short"]
+    volumes:
+      - ./tests:/app/tests
+      - ./PythonScripts:/app/PythonScripts
+      - ./SampleData:/app/SampleData
+    profiles:
+      - test
+
+volumes:
+  ollama_data:
