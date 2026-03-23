@@ -177,3 +177,69 @@ def ask(
     prompt = build_prompt(query, retrieved)
     answer = call_ollama(prompt, model=ollama_model)
     return answer
+
+
+# ------------------------------------------------------------------ #
+#  Office Auditor — specialised prompt + entry point                   #
+# ------------------------------------------------------------------ #
+
+def build_auditor_prompt(query: str, context_chunks: List[str]) -> str:
+    """
+    Build a prompt with the Office Auditor system instructions.
+    The LLM is told to act as a productivity analyst and use the
+    Pandas-calculated metrics to answer workforce questions.
+    """
+    context_block = "\n---\n".join(context_chunks)
+    return textwrap.dedent(f"""\
+        You are an expert Office Productivity Auditor.
+        You have been given pre-calculated productivity metrics derived from
+        real employee timesheets and task logs using Pandas.
+
+        Your job is to answer the user's question using ONLY the data below.
+        When answering, you MUST:
+        1. Identify the least performing team member (lowest tasks/hour ratio).
+        2. Identify the most time-allotted individual for the month (highest total hours).
+        3. Comment on trends in team productivity (spread, outliers, workload balance).
+        4. Support every claim with the specific numbers from the data.
+        5. If the data does not contain enough information to answer, say so.
+
+        ### Productivity Data (calculated via Pandas)
+        {context_block}
+
+        ### User Question
+        {query}
+
+        ### Auditor Analysis""")
+
+
+def ask_auditor(
+    query: str,
+    context_text: str,
+    ollama_model: str = "llama3",
+) -> str:
+    """
+    Office Auditor RAG pipeline.
+
+    Same chunking + retrieval flow as ``ask()``, but uses the auditor
+    system prompt that instructs the LLM to identify top/bottom
+    performers and productivity trends.
+
+    *context_text* is the Markdown string returned by
+    ``analysis_engine.build_audit_context()``.
+    """
+    raw_chunks = [c.strip() for c in context_text.split("\n\n") if c.strip()]
+    if not raw_chunks:
+        raw_chunks = [
+            context_text[i : i + 500]
+            for i in range(0, len(context_text), 500)
+        ]
+
+    store = SimpleVectorStore()
+    store.add(raw_chunks)
+
+    results = store.search(query, top_k=5)
+    retrieved = [text for _, text in results]
+
+    prompt = build_auditor_prompt(query, retrieved)
+    answer = call_ollama(prompt, model=ollama_model)
+    return answer

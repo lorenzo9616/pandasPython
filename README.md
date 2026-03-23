@@ -20,13 +20,20 @@ pandasPython/
 │   └── Program.cs              # C# interop layer (pythonnet + GIL)
 ├── PythonScripts/
 │   ├── data_processor.py       # Pandas: load Excel, GroupBy, filter
+│   ├── analysis_engine.py      # Office Auditor: merge, metrics, context
 │   └── rag_engine.py           # Embeddings, vector store, Ollama calls
 ├── SampleData/
-│   └── generate_sample.py      # Script to create a sample sales.xlsx
+│   ├── generate_sample.py      # Script to create sales.xlsx
+│   └── generate_audit_data.py  # Script to create staff_list + task_logs
 ├── tests/
 │   ├── conftest.py             # Shared fixtures (auto-generates sample data)
 │   ├── test_data_processor.py  # Unit tests for Pandas operations
+│   ├── test_analysis_engine.py # Unit tests for Office Auditor
 │   └── test_rag_engine.py      # Unit tests for RAG pipeline
+├── visual-explanation/         # Architecture diagrams & sample scenarios
+│   ├── architecture-diagram.md
+│   ├── data-flow-diagram.md
+│   └── sample-scenarios.md
 ├── scripts/
 │   ├── setup.sh                # One-command local setup
 │   └── run_tests.sh            # Test runner
@@ -70,7 +77,7 @@ bash scripts/setup.sh
 # Or step-by-step:
 pip install -r requirements.txt
 pip install pytest
-cd SampleData && python generate_sample.py && cd ..
+cd SampleData && python generate_sample.py && python generate_audit_data.py && cd ..
 cd RagHost && dotnet restore && cd ..
 ```
 
@@ -102,6 +109,8 @@ pip install pytest           # for running tests
 | `openpyxl` | >= 3.1 | Excel .xlsx read/write engine |
 | `sentence-transformers` | >= 2.2 | Local embedding model (all-MiniLM-L6-v2) |
 | `numpy` | >= 1.24 | Vector operations for similarity search |
+| `python-dotenv` | >= 1.0 | .env file support for configuration |
+| `tabulate` | >= 0.9 | Markdown table rendering (`pd.to_markdown()`) |
 | `pytest` | latest | Test framework |
 
 ### 2. Install .NET NuGet packages
@@ -193,7 +202,44 @@ docker compose run --rm \
     rag-app --file /app/data.xlsx --group YourColumn
 ```
 
+### Office Auditor Mode (two-file merge + productivity analysis)
+
+```bash
+cd RagHost
+
+# Generate productivity report (no LLM needed)
+dotnet run -- --audit \
+    --staff ../SampleData/staff_list.xlsx \
+    --tasks ../SampleData/task_logs.xlsx
+
+# Ask about employee performance
+dotnet run -- --audit \
+    --staff ../SampleData/staff_list.xlsx \
+    --tasks ../SampleData/task_logs.xlsx \
+    -q "Who is the least productive employee and why?"
+
+# Custom merge key
+dotnet run -- --audit \
+    --staff staff.xlsx --tasks logs.xlsx \
+    --merge-key EmpID \
+    -q "Compare department productivity"
+```
+
+### With Docker (Audit Mode)
+
+```bash
+docker compose up rag-audit
+
+docker compose run --rm rag-audit \
+    --audit \
+    --staff /app/SampleData/staff_list.xlsx \
+    --tasks /app/SampleData/task_logs.xlsx \
+    -q "Who worked the most hours this month?"
+```
+
 ### CLI Options
+
+**Single-File Mode:**
 
 | Flag | Description |
 |------|-------------|
@@ -201,6 +247,20 @@ docker compose run --rm \
 | `--group, -g` | Column name for GroupBy summarization |
 | `--filter-column` | Column to filter on |
 | `--filter-value` | Value to match in the filter column |
+
+**Audit Mode:**
+
+| Flag | Description |
+|------|-------------|
+| `--audit` | Enable two-file audit mode |
+| `--staff` | Path to the staff list file (.xlsx/.csv) **(required)** |
+| `--tasks` | Path to the task logs file (.xlsx/.csv) **(required)** |
+| `--merge-key` | Column to join on (default: `EmployeeID`) |
+
+**Shared:**
+
+| Flag | Description |
+|------|-------------|
 | `--query, -q` | Natural-language question for the RAG pipeline |
 | `--model, -m` | Ollama model name (default: `llama3`) |
 
@@ -239,6 +299,7 @@ docker compose --profile test run --rm tests
 | File | Tests | What it covers |
 |------|-------|----------------|
 | `test_data_processor.py` | 10 | Excel loading, validation, GroupBy, filtering, schema |
+| `test_analysis_engine.py` | 16 | File loading, merge, productivity calc, formatting, audit context |
 | `test_rag_engine.py` | 6 | Prompt building, embedding shapes, vector search, Ollama error handling |
 
 **Tests that run without extra dependencies:**
@@ -272,12 +333,23 @@ PythonEngine.Shutdown()
 - `filter_rows()` — filters rows where a column matches a value
 - Returns plain-text table strings as RAG context
 
-### 3. RAG Engine (`rag_engine.py`)
+### 3. Office Auditor / Analysis Engine (`analysis_engine.py`)
+
+- Loads two files (staff list + task logs) and performs `pd.merge()` on a shared key
+- `calculate_productivity()` — computes `total_hours`, `total_tasks`, `tasks_per_hour`, `workload_pct`
+- `format_top_bottom()` — renders top/bottom N performers as Markdown tables
+- `format_summary_stats()` — team-wide metrics including most hours worked and lowest efficiency
+- `build_audit_context()` — end-to-end: merge → metrics → Markdown report string
+
+### 4. RAG Engine (`rag_engine.py`)
 
 - Embeds text chunks with `sentence-transformers` (model: `all-MiniLM-L6-v2`)
 - Stores vectors in a simple NumPy array (no external vector DB)
-- Retrieves top-3 most similar chunks via cosine similarity
-- Builds a constrained prompt and sends it to Ollama's `/api/generate` endpoint
+- Retrieves top-k most similar chunks via cosine similarity
+- `build_prompt()` — generic data analyst prompt
+- `build_auditor_prompt()` — specialised Office Auditor prompt that mandates identification of least performer, most hours worked, and productivity trends
+- `ask()` — single-file RAG entry point
+- `ask_auditor()` — audit-mode RAG entry point with auditor system prompt
 
 ---
 
@@ -285,12 +357,11 @@ PythonEngine.Shutdown()
 
 ```
 docker-compose.yml
- ├── rag-app      .NET 8 + Python 3.11 (multi-stage build)
- │    ├── Builds C# app in SDK image
- │    └── Runs in runtime image with Python installed
+ ├── rag-app      Single-file mode (.NET 8 + Python 3.11)
+ ├── rag-audit    Audit mode (two-file merge + productivity)
  ├── ollama       Local LLM server (GPU optional)
  │    └── Persists models in named volume
- └── tests        Same image as rag-app, entrypoint = pytest
+ └── tests        Same image, entrypoint = pytest
       └── Activated with --profile test
 ```
 
@@ -353,6 +424,21 @@ C# code creates PyObject wrapper
 #### 5. Data Marshalling
 
 Primitive types (int, float, string, bool) are automatically marshalled between C# and Python. For complex types (DataFrames, numpy arrays), pythonnet uses `dynamic` dispatch, which invokes Python's `__getattr__`/`__setattr__` under the hood via the CPython C-API. The data stays in Python's heap; C# gets a thin proxy, not a copy.
+
+---
+
+## Visual Explanation & Sample Scenarios
+
+See the `visual-explanation/` folder for detailed diagrams and worked examples:
+
+- **`architecture-diagram.md`** — System architecture, Docker layout, memory management flow
+- **`data-flow-diagram.md`** — Step-by-step data flow for single-file and audit modes, C# ↔ Python interop
+- **`sample-scenarios.md`** — 5 real-world scenarios with commands and expected output:
+  1. Comparing working hours of employees
+  2. Comparing performance / delivery efficiency
+  3. Comparing tardiness / missed hours
+  4. Department-level comparison
+  5. Identifying employees needing support
 
 ---
 

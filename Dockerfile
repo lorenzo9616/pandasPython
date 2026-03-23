@@ -45,8 +45,8 @@ COPY --from=build /app/publish .
 COPY PythonScripts/ /app/PythonScripts/
 COPY SampleData/ /app/SampleData/
 
-# Generate sample Excel data
-RUN cd /app/SampleData && python generate_sample.py
+# Generate all sample Excel data
+RUN cd /app/SampleData && python generate_sample.py && python generate_audit_data.py
 
 # Set the Python shared library path for pythonnet
 ENV PYTHON_DLL=/usr/lib/x86_64-linux-gnu/libpython3.11.so

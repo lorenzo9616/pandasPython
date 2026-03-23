@@ -18,7 +18,7 @@ pip install pytest
 
 echo ""
 echo "=== 3/4  Generating sample Excel data ==="
-cd SampleData && python generate_sample.py && cd ..
+cd SampleData && python generate_sample.py && python generate_audit_data.py && cd ..
 
 echo ""
 echo "=== 4/4  Restoring .NET packages ==="

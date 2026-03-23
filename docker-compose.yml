@@ -16,7 +16,7 @@ services:
     #           count: all
     #           capabilities: [gpu]
 
-  # ---------- RAG application ----------
+  # ---------- RAG application (single-file mode) ----------
   rag-app:
     build:
       context: .
@@ -28,11 +28,26 @@ services:
       - PYTHON_DLL=/usr/lib/x86_64-linux-gnu/libpython3.11.so
     volumes:
       - ./SampleData:/app/SampleData
-    # Override the default CMD to run a full RAG query
-    # The Ollama URL points to the sibling container
     command: >
       --file /app/SampleData/sales.xlsx
       --group Category
+
+  # ---------- Office Auditor (two-file audit mode) ----------
+  rag-audit:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rag-audit
+    depends_on:
+      - ollama
+    environment:
+      - PYTHON_DLL=/usr/lib/x86_64-linux-gnu/libpython3.11.so
+    volumes:
+      - ./SampleData:/app/SampleData
+    command: >
+      --audit
+      --staff /app/SampleData/staff_list.xlsx
+      --tasks /app/SampleData/task_logs.xlsx
 
   # ---------- Run tests ----------
   tests:
